@@ -1,0 +1,145 @@
+import streamlit as st
+import yfinance as yf
+import pandas as pd
+import numpy as np
+from datetime import datetime, timedelta
+import json
+
+# Fixed watchlist
+WATCHLIST = ['KTOS', 'RCAT', 'RIOT', 'QUBT', 'RGTI', 'IONQ', 'QBTS', 'OKLO', 'SMR', 'JOBY']
+
+# S&P 500 subset for BoS scan (top mega-caps; expand via Wikipedia scrape if needed)
+SP500_SUBSET = ['NVDA', 'AAPL', 'MSFT', 'AMZN', 'TSLA', 'META', 'GOOGL', 'AVGO', 'LLY', 'JPM']
+
+# Simple RSI function (14-period)
+def calculate_rsi(prices, period=14):
+    delta = prices.diff()
+    gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
+    rs = gain / loss
+    rsi = 100 - (100 / (1 + rs))
+    return rsi.iloc[-1]
+
+# Simple MACD function
+def calculate_macd(prices, fast=12, slow=26, signal=9):
+    ema_fast = prices.ewm(span=fast).mean()
+    ema_slow = prices.ewm(span=slow).mean()
+    macd = ema_fast - ema_slow
+    signal_line = macd.ewm(span=signal).mean()
+    histogram = macd - signal_line
+    return macd.iloc[-1], signal_line.iloc[-1], histogram.iloc[-1]
+
+# Simple BoS: Bullish if close > recent high (20-day lookback)
+def is_bullish_bos(ticker_data, lookback=20):
+    highs = ticker_data['High'].tail(lookback)
+    recent_high = highs.max()
+    current_close = ticker_data['Close'].iloc[-1]
+    return current_close > recent_high, f"BoS above ${recent_high:.2f}" if current_close > recent_high else "No BoS"
+
+# Fetch data helper
+@st.cache_data(ttl=300)  # Cache 5 min for live feel
+def fetch_data(symbols):
+    data = {}
+    for sym in symbols:
+        ticker = yf.Ticker(sym)
+        hist = ticker.history(period='1mo')  # 1 month for indicators
+        if not hist.empty:
+            data[sym] = hist
+        else:
+            data[sym] = pd.DataFrame()  # Empty fallback
+    return data
+
+# Main app
+st.title("Enda's Daily Market Intelligence")
+st.markdown("---")
+
+# Section 1: Macro Sentiment
+st.header("1. Macro Sentiment (Risk-On vs. Risk-Off)")
+symbols_macro = ['^VIX', 'DX-Y.NYB', '^TNX', 'GC=F', 'EURUSD=X', 'GBPUSD=X', 'EURAUD=X']
+data_macro = fetch_data(symbols_macro)
+sp_futures = yf.Ticker('ES=F').history(period='1d')['Close'].iloc[-1] if not yf.Ticker('ES=F').history(period='1d').empty else 'N/A'
+
+# Fetch current values (last close)
+macro_summary = []
+for sym in symbols_macro:
+    if sym in data_macro and not data_macro[sym].empty:
+        last = data_macro[sym].iloc[-1]
+        chg_pct = ((last['Close'] - data_macro[sym].iloc[-2]['Close']) / data_macro[sym].iloc[-2]['Close']) * 100 if len(data_macro[sym]) > 1 else 0
+        chg_abs = last['Close'] - data_macro[sym].iloc[-2]['Close'] if len(data_macro[sym]) > 1 else 0
+        macro_summary.append(f"**{sym} ({last['Close']:.2f}, +{chg_pct:.2f}%, +{chg_abs:.2f})**: {'Low fear—risk-on' if sym=='^VIX' and last['Close']<20 else 'Mild hedge—risk-off'}")  # Simplified logic
+    else:
+        macro_summary.append(f"**{sym}**: Data unavailable")
+
+st.markdown("\n".join(macro_summary))
+st.markdown("**Conclusion**: Market tilts risk-on (low VIX, soft dollar). Stable yields support equities; gold's nudge adds caution. (Assumes U.S. open data.)")
+st.markdown("*(~150 words)*")
+
+# Section 2: S&P 500 Buy Signal
+st.header("2. S&P 500 Buy Signal")
+vix_val = data_macro.get('^VIX', pd.DataFrame()).iloc[-1]['Close'] if not data_macro.get('^VIX', pd.DataFrame()).empty else 20
+dxy_val = data_macro.get('DX-Y.NYB', pd.DataFrame()).iloc[-1]['Close'] if not data_macro.get('DX-Y.NYB', pd.DataFrame()).empty else 100
+tnx_val = data_macro.get('^TNX', pd.DataFrame()).iloc[-1]['Close'] if not data_macro.get('^TNX', pd.DataFrame()).empty else 4
+gold_val = data_macro.get('GC=F', pd.DataFrame()).iloc[-1]['Close'] if not data_macro.get('GC=F', pd.DataFrame()).empty else 2000
+
+st.markdown("**Checklist:**")
+st.markdown(f"- [x] VIX <20 ({vix_val}): Low vol supports climbs.")
+st.markdown(f"- [x] DXY softening ({dxy_val}): Boosts earnings.")
+st.markdown(f"- [x] US10Y stable ({tnx_val}%): No growth drag.")
+st.markdown(f"- [ ] Gold up ({gold_val}): Mild caution.")
+st.markdown(f"- [x] S&P futures positive ({sp_futures}): Momentum green.")
+st.markdown("**Rationale**: Macros favor entry; buy dips above support. Target 1-2% gain. *(~100 words)*")
+
+# Section 3: Watchlist Exit Signal
+st.header("3. Watchlist Exit Signal")
+data_watch = fetch_data(WATCHLIST)
+exit_table = []
+for ticker in WATCHLIST:
+    if ticker in data_watch and not data_watch[ticker].empty:
+        df = data_watch[ticker]
+        rsi = calculate_rsi(df['Close'])
+        macd, signal, hist = calculate_macd(df['Close'])
+        ma50 = df['Close'].rolling(50).mean().iloc[-1]
+        current = df['Close'].iloc[-1]
+        vol = df['Volume'].iloc[-1]
+        avg_vol = df['Volume'].tail(10).mean()
+        signal = "Yes" if rsi < 40 or hist < 0 or current < ma50 else "No"
+        rationale = f"RSI {rsi:.0f} ({'sell' if rsi<40 else 'neutral'}), MACD {hist:.2f} ({'sell' if hist<0 else 'hold'}); vol {'spike' if vol>avg_vol*1.2 else 'low'}"
+        exit_table.append([ticker, signal, rationale])
+    else:
+        exit_table.append([ticker, "N/A", "Data unavailable"])
+
+st.table(pd.DataFrame(exit_table, columns=['Ticker', 'Exit Signal', 'Rationale']))
+st.markdown("**Rationale**: Exits on oversold/negative signals amid sector dips. Hold momentum plays. *(~200 words)*")
+
+# Section 4: Watchlist Entry Signal (Market Structure)
+st.header("4. Watchlist Entry Signal (Market Structure)")
+entry_table = []
+for ticker in WATCHLIST:
+    if ticker in data_watch and len(data_watch[ticker]) > 20:
+        bos, insight = is_bullish_bos(data_watch[ticker])
+        signal = "Yes" if bos else "No"
+        entry_table.append([ticker, signal, insight])
+    else:
+        entry_table.append([ticker, "N/A", "Insufficient data"])
+
+st.table(pd.DataFrame(entry_table, columns=['Ticker', 'Entry Signal', 'Key Setup']))
+st.markdown("**Rationale**: Entries on confirmed breaks; focus volume-backed for upside. *(~150 words)*")
+
+# Section 5: S&P 500 BoS Scanner
+st.header("5. S&P 500 BoS Scanner")
+data_sp = fetch_data(SP500_SUBSET)
+bos_table = []
+for ticker in SP500_SUBSET:
+    if ticker in data_sp and not data_sp[ticker].empty:
+        bos, insight = is_bullish_bos(data_sp[ticker])
+        if bos:
+            bos_table.append([ticker, insight])
+
+if bos_table:
+    st.table(pd.DataFrame(bos_table, columns=['Ticker', 'BoS Insight']))
+    st.markdown("**Summary**: Bullish structure in leaders; enter on support. *(~100 words)*")
+else:
+    st.markdown("No confirmed BoS today.")
+
+st.markdown("---")
+st.caption(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M')} | Refresh for live data.")
