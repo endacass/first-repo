@@ -1,0 +1,15 @@
+import yfinance as yf
+import json
+from datetime import datetime
+
+symbols = ['^VIX', 'DX-Y.NYB', '^TNX', 'GC=F', 'EURUSD=X', 'GBPUSD=X', 'EURAUD=X', 'ES=F'] + WATCHLIST + SP500_SUBSET
+data = {}
+for sym in symbols:
+    ticker = yf.Ticker(sym)
+    hist = ticker.history(period='1mo')
+    data[sym] = hist.to_dict() if not hist.empty else {}
+
+with open('data.json', 'w') as f:
+    json.dump({'timestamp': datetime.now().isoformat(), 'data': data}, f)
+
+print("Daily update complete.")
